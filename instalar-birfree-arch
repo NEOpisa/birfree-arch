@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFERIR=
+[[ ${1:-} == --conferir ]] && CONFERIR=1
+REPO=NEOpisa/birfree-beta
+DATA=${BIRFREE_DATA:-2026/10/01}
+ARQUIVO="https://archive.archlinux.org/repos/$DATA"
+MIRRORLIST=/etc/pacman.d/mirrorlist
+BASE=(
+  kwin qt6-base sddm plasma-desktop systemsettings plasma-integration plasma-nm plasma-pa
+  bluedevil powerdevil kscreen kscreenlocker kwallet-pam kglobalacceld kactivitymanagerd
+  kde-cli-tools kde-gtk-config xdg-desktop-portal-kde xorg-xwayland breeze
+  dolphin ffmpegthumbs kdegraphics-thumbnailers kate ark spectacle gwenview okular firefox
+  pipewire pipewire-pulse pipewire-alsa wireplumber
+  networkmanager bluez bluez-utils power-profiles-daemon
+  noto-fonts noto-fonts-emoji mesa vulkan-icd-loader vulkan-intel vulkan-radeon
+)
+SERVICOS=(sddm NetworkManager bluetooth power-profiles-daemon)
+
+azul=$'\e[1;34m'; vermelho=$'\e[1;31m'; fim=$'\e[0m'
+passo() { printf '\n%s▸ %s%s\n' "$azul" "$*" "$fim"; }
+erro() { printf '%s✖ %s%s\n' "$vermelho" "$*" "$fim" >&2; exit 1; }
+
+# ---------------------------------------------------------- conferir --
+[[ $EUID -ne 0 ]] || erro 'Rode como usuário normal (com sudo), não como root.'
+[[ -f /etc/arch-release && $(uname -m) == x86_64 ]] || erro 'Só para Arch Linux x86_64.'
+[[ -t 0 ]] || erro 'Rode assim:  bash <(curl -fsSL URL)  (o pacman precisa do teclado)'
+for cmd in curl sha256sum tar sudo pacman; do
+  command -v "$cmd" >/dev/null || erro "Falta o comando: $cmd"
+done
+[[ -n $CONFERIR ]] || sudo -v || erro 'Seu usuário precisa de sudo.'
+
+pasta=$(mktemp -d "${TMPDIR:-/tmp}/birfree-arch.XXXXXX")
+trap 'rm -rf "$pasta"' EXIT
+cd "$pasta"
+
+# ------------------------------------------------------------ baixar --
+passo 'Baixando a versão mais recente do Birfree'
+url="https://github.com/$REPO/releases/latest/download"
+curl -fL --progress-bar -O "$url/Birfree-Beta-x86_64.tar.gz"
+curl -fsSL -O "$url/SHA256SUMS-birup"
+curl -fsSL -O "$url/SHA256SUMS-birup.minisig"
+grep -E '^[0-9a-f]{64}[[:space:]]+\*?Birfree-Beta-x86_64\.tar\.gz$' SHA256SUMS-birup | sha256sum --check --status \
+  || erro 'O arquivo baixado não confere com o SHA256SUMS-birup da release.'
+passo 'Conferindo a assinatura da release'
+if ! command -v minisign >/dev/null; then
+  [[ -n $CONFERIR ]] && erro 'Falta o minisign (sudo pacman -S minisign).'
+  sudo pacman -S --needed --noconfirm minisign \
+    || erro 'Não deu para instalar o minisign; rode antes: sudo pacman -Syu minisign'
+fi
+printf '%s\n' 'untrusted comment: minisign public key: 83A26F098A9E06E5' \
+  'RWTlBp6KCW+igyP9AzvDQ3MIvq5m9nROwbOH4sih+P8LgkQ9pUCldhDi' > birfree.pub
+minisign -Vqm SHA256SUMS-birup -p birfree.pub -x SHA256SUMS-birup.minisig \
+  || erro 'A assinatura da release não confere. Nada foi instalado.'
+echo '  assinatura ✓'
+
+tar -xzf Birfree-Beta-x86_64.tar.gz
+DIR="$pasta/Birfree-Beta-x86_64"
+[[ -x $DIR/instalar-birfree && -f $DIR/VERSOES.txt ]] || erro 'Release sem instalar-birfree ou VERSOES.txt.'
+head -n1 "$DIR/VERSOES.txt"
+
+versao() { sed -n "s/^installed = $1-\(.*\)-x86_64$/\1/p" "$DIR/VERSOES.txt" | head -n1; }
+passo "Conferindo o Arch de $DATA"
+for nome in kwin qt6-base; do
+  v=$(versao "$nome")
+  [[ -n $v ]] || erro "VERSOES.txt sem a versão de $nome."
+  curl -fsI "$ARQUIVO/extra/os/x86_64/$nome-$v-x86_64.pkg.tar.zst" >/dev/null \
+    || erro "O Arch de $DATA não tem $nome $v. Rode com BIRFREE_DATA=AAAA/MM/DD da release."
+  printf '  %s %s ✓\n' "$nome" "$v"
+done
+
+[[ -z $CONFERIR ]] || { printf '\nTudo confere. Nada foi alterado (--conferir).\n'; exit 0; }
+
+# ------------------------------------------------------------- avisar --
+cat <<TXT
+
+Isto vai:
+  1. travar o pacman no Arch Linux de $DATA (o Birfree precisa do KDE dessa data;
+     o mirrorlist atual fica em $MIRRORLIST.antes-birfree)
+  2. voltar o sistema inteiro para essa data (pacman -Syyuu)
+  3. instalar o KDE base, o SDDM, rede, som e os apps
+  4. instalar o Birfree e o Birup, e ligar ${SERVICOS[*]}
+TXT
+read -r -p $'\nContinuar? [s/N] ' resp
+[[ $resp == [sS]* ]] || { echo 'Nada foi alterado.'; exit 0; }
+
+# ------------------------------------------------------------- travar --
+passo "Travando o pacman em $DATA"
+[[ -f $MIRRORLIST.antes-birfree ]] || sudo cp -a "$MIRRORLIST" "$MIRRORLIST.antes-birfree"
+printf '# Birfree: Arch Linux de %s\nServer = %s/$repo/os/$arch\n' "$DATA" "$ARQUIVO" | sudo tee "$MIRRORLIST" >/dev/null
+trap 'printf "\nParou no meio. Para destravar: sudo mv %s.antes-birfree %s\n" "$MIRRORLIST" "$MIRRORLIST" >&2' ERR
+sudo pacman -Syyuu --noconfirm
+
+passo 'Instalando a base do Birfree'
+sudo pacman -S --needed --noconfirm "${BASE[@]}"
+
+# ------------------------------------------------------------ birfree --
+passo 'Instalando o Birfree'
+"$DIR/instalar-birfree"
+
+passo 'Ligando os serviços'
+sudo systemctl enable "${SERVICOS[@]}"
+
+printf '\n%sPronto.%s Reinicie (sudo reboot) e entre em "Birfree" na tela de login.\n' "$azul" "$fim"
+printf 'Para destravar o Arch depois: sudo mv %s.antes-birfree %s\n' "$MIRRORLIST" "$MIRRORLIST"
