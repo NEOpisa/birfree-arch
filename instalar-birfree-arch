@@ -4,6 +4,8 @@ set -euo pipefail
 CONFERIR=
 [[ ${1:-} == --conferir ]] && CONFERIR=1
 REPO=NEOpisa/birfree-beta
+RAW=https://raw.githubusercontent.com/NEOpisa/birfree-arch/main
+P10K=9253fb1c5034410c43a0c681ff8294181c54016c
 DATA=${BIRFREE_DATA:-2026/10/01}
 ARQUIVO="https://archive.archlinux.org/repos/$DATA"
 MIRRORLIST=/etc/pacman.d/mirrorlist
@@ -15,6 +17,7 @@ BASE=(
   pipewire pipewire-pulse pipewire-alsa wireplumber
   networkmanager bluez bluez-utils power-profiles-daemon
   noto-fonts noto-fonts-emoji mesa vulkan-icd-loader vulkan-intel vulkan-radeon
+  zsh zsh-autosuggestions zsh-syntax-highlighting ttf-meslo-nerd git fastfetch
 )
 SERVICOS=(sddm NetworkManager bluetooth power-profiles-daemon)
 
@@ -81,6 +84,7 @@ Isto vai:
   2. voltar o sistema inteiro para essa data (pacman -Syyuu)
   3. instalar o KDE base, o SDDM, rede, som e os apps
   4. instalar o Birfree e o Birup, e ligar ${SERVICOS[*]}
+  5. deixar o zsh com o powerlevel10k como shell padrão
 TXT
 read -r -p $'\nContinuar? [s/N] ' resp
 [[ $resp == [sS]* ]] || { echo 'Nada foi alterado.'; exit 0; }
@@ -98,6 +102,22 @@ sudo pacman -S --needed --noconfirm "${BASE[@]}"
 # ------------------------------------------------------------ birfree --
 passo 'Instalando o Birfree'
 "$DIR/instalar-birfree"
+
+passo 'zsh com powerlevel10k'
+p10k="$HOME/.local/share/powerlevel10k"
+if [[ $(git -C "$p10k" rev-parse HEAD 2>/dev/null) != "$P10K" ]]; then
+  rm -rf "$p10k"
+  git init -q "$p10k"
+  git -C "$p10k" fetch -q --depth 1 https://github.com/romkatv/powerlevel10k.git "$P10K"
+  git -C "$p10k" checkout -q FETCH_HEAD
+fi
+for f in zshrc p10k.zsh; do
+  destino="$HOME/.${f}"
+  curl -fsSL -o "$pasta/$f" "$RAW/configs/zsh/$f"
+  [[ ! -f $destino ]] || cmp -s "$destino" "$pasta/$f" || cp -a "$destino" "$destino.antes-birfree"
+  cp "$pasta/$f" "$destino"
+done
+[[ $(getent passwd "$USER" | cut -d: -f7) == /usr/bin/zsh ]] || sudo chsh -s /usr/bin/zsh "$USER"
 
 passo 'Ligando os serviços'
 sudo systemctl enable "${SERVICOS[@]}"
